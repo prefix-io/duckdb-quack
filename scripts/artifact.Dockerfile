@@ -8,9 +8,12 @@
 # image builds' --validate step).
 
 FROM debian:bookworm AS build
+# clang, not g++: bookworm's gcc 12 rejects the duckdb unique_ptr
+# derived-to-base conversions used throughout upstream quack code.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates cmake g++ git libcurl4-openssl-dev libssl-dev make ninja-build python3 \
+    ca-certificates clang cmake git libcurl4-openssl-dev libssl-dev make ninja-build python3 \
   && rm -rf /var/lib/apt/lists/*
+ENV CC=clang CXX=clang++
 
 ARG QUACK_REPO=https://github.com/prefix-io/duckdb-quack
 ARG QUACK_COMMIT
