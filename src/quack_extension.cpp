@@ -126,6 +126,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(QuackClearCacheFunction::GetFunction());
 	loader.RegisterFunction(GetQuackIdentifyFunction());
 	loader.RegisterFunction(QuacktivityFunction::GetFunction());
+	loader.RegisterFunction(QuackCancelConnectionFunction::GetFunctions());
 
 	// the default authentication function
 	ScalarFunction quack_check_token("quack_check_token",

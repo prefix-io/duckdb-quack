@@ -17,6 +17,10 @@ enum class MessageType : uint8_t {
 	APPEND_REQUEST = 9,
 	SUCCESS_RESPONSE = 10,
 	DISCONNECT_MESSAGE = 11,
+	//! v2+: targeted cancellation of the connection's active query. The target is
+	//! identified by the header's connection_id + client_query_id; a stale or
+	//! mismatched client_query_id is rejected rather than cancelling newer work.
+	CANCEL_REQUEST = 12,
 	ERROR_RESPONSE = 100
 };
 
@@ -226,7 +230,7 @@ class ConnectionResponseMessage : public QuackMessage {
 public:
 	static constexpr MessageType TYPE = MessageType::CONNECTION_RESPONSE;
 
-	explicit ConnectionResponseMessage(string connection_id_p);
+	ConnectionResponseMessage(string connection_id_p, idx_t negotiated_version);
 
 protected:
 	ConnectionResponseMessage() : QuackMessage(TYPE) {
@@ -341,6 +345,20 @@ public:
 
 protected:
 	DisconnectMessage() : QuackMessage(TYPE) {
+	}
+};
+
+class CancelRequestMessage : public QuackMessage {
+public:
+	static constexpr MessageType TYPE = MessageType::CANCEL_REQUEST;
+
+	explicit CancelRequestMessage(string connection_id_p) : QuackMessage(TYPE, std::move(connection_id_p)) {};
+
+	void Serialize(Serializer &serializer) const override;
+	static unique_ptr<CancelRequestMessage> Deserialize(Deserializer &deserializer);
+
+protected:
+	CancelRequestMessage() : QuackMessage(TYPE) {
 	}
 };
 

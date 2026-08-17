@@ -11,6 +11,8 @@ static string QueryStateToString(QuackQueryState state) {
 	switch (state) {
 	case QuackQueryState::IDLE:
 		return "idle";
+	case QuackQueryState::CANCELLING:
+		return "cancelling";
 	case QuackQueryState::ACTIVE:
 		return "active";
 	case QuackQueryState::FINISHED:
@@ -38,8 +40,8 @@ struct QuackActiveConnectionsData : FunctionData {
 static unique_ptr<FunctionData> QuackActiveConnectionsBind(ClientContext &, TableFunctionBindInput &,
                                                            vector<LogicalType> &return_types, vector<string> &names) {
 	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
-	                LogicalType::TIMESTAMP};
-	names = {"server_id", "connection_id", "query", "state", "query_started_at"};
+	                LogicalType::TIMESTAMP, LogicalType::BIGINT};
+	names = {"server_id", "connection_id", "query", "state", "query_started_at", "protocol_version"};
 	return make_uniq<QuackActiveConnectionsData>();
 }
 
@@ -62,6 +64,7 @@ static void QuackActiveConnectionsScan(ClientContext &context, TableFunctionInpu
 		} else {
 			output.SetValue(4, row, Value::TIMESTAMP(snap.query_started_at));
 		}
+		output.SetValue(5, row, Value::BIGINT(NumericCast<int64_t>(snap.negotiated_version)));
 		row++;
 	}
 	output.SetCardinality(row);
@@ -70,6 +73,46 @@ static void QuackActiveConnectionsScan(ClientContext &context, TableFunctionInpu
 
 TableFunction QuacktivityFunction::GetFunction() {
 	return TableFunction("quack_active_connections", {}, QuackActiveConnectionsScan, QuackActiveConnectionsBind);
+}
+
+static void QuackCancelConnectionImpl(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &db = *state.GetContext().db;
+	auto count = args.size();
+	UnifiedVectorFormat connection_ids;
+	args.data[0].ToUnifiedFormat(count, connection_ids);
+	UnifiedVectorFormat query_ids;
+	if (args.ColumnCount() > 1) {
+		args.data[1].ToUnifiedFormat(count, query_ids);
+	}
+
+	auto result_data = FlatVector::GetData<bool>(result);
+	for (idx_t row = 0; row < count; row++) {
+		auto id_idx = connection_ids.sel->get_index(row);
+		if (!connection_ids.validity.RowIsValid(id_idx)) {
+			throw InvalidInputException("quack_cancel_connection: connection_id must not be NULL");
+		}
+		auto connection_id = UnifiedVectorFormat::GetData<string_t>(connection_ids)[id_idx].GetString();
+		optional_idx expected_query_id;
+		if (args.ColumnCount() > 1) {
+			auto query_idx = query_ids.sel->get_index(row);
+			if (query_ids.validity.RowIsValid(query_idx)) {
+				expected_query_id = NumericCast<idx_t>(UnifiedVectorFormat::GetData<int64_t>(query_ids)[query_idx]);
+			}
+		}
+		QuackStorageExtensionInfo::GetState(db).CancelConnection(connection_id, expected_query_id);
+		result_data[row] = true;
+	}
+	if (count == 1) {
+		result.SetVectorType(VectorType::CONSTANT_VECTOR);
+	}
+}
+
+ScalarFunctionSet QuackCancelConnectionFunction::GetFunctions() {
+	ScalarFunctionSet set("quack_cancel_connection");
+	set.AddFunction(ScalarFunction({LogicalType::VARCHAR}, LogicalType::BOOLEAN, QuackCancelConnectionImpl));
+	set.AddFunction(
+	    ScalarFunction({LogicalType::VARCHAR, LogicalType::BIGINT}, LogicalType::BOOLEAN, QuackCancelConnectionImpl));
+	return set;
 }
 
 } // namespace duckdb

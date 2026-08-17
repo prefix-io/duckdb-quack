@@ -1,0 +1,59 @@
+# name: test/sql/cancel_and_negotiation.test
+# description: protocol v2 negotiation surface + quack_cancel_connection error paths
+# group: [sql]
+
+require quack
+
+require httpfs
+
+set ignore_error_messages __none__
+
+statement ok
+create table fuu as values(42, 43);
+
+statement ok con1
+call quack_serve('quack:localhost', token='asdf');
+
+# fork client against fork server negotiates protocol v2
+statement ok con2
+attach 'quack:localhost' as rpc2 (token 'asdf');
+
+query I con1
+select protocol_version from quack_active_connections();
+----
+2
+
+query II con2
+from rpc2.fuu;
+----
+42	43
+
+# cancelling an unknown connection fails loudly
+statement error con1
+select quack_cancel_connection('no-such-connection');
+----
+Unknown connection id
+
+# a stale query identity is rejected before any cancellation happens
+statement error con1
+select quack_cancel_connection(connection_id, 999999999999) from quack_active_connections();
+----
+stale query identity
+
+# cancelling a connection with no active query is an error, not a silent no-op
+statement error con1
+select quack_cancel_connection(connection_id) from quack_active_connections();
+----
+no active query
+
+statement ok con2
+detach rpc2;
+
+# the disconnect reaped the idle connection
+query I con1
+select count(*) from quack_active_connections();
+----
+0
+
+statement ok con1
+call quack_stop('quack:localhost');

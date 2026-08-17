@@ -55,6 +55,14 @@ unique_ptr<ConnectionResponseMessage> ConnectionResponseMessage::Deserialize(Des
 	return result;
 }
 
+void CancelRequestMessage::Serialize(Serializer &serializer) const {
+}
+
+unique_ptr<CancelRequestMessage> CancelRequestMessage::Deserialize(Deserializer &deserializer) {
+	auto result = duckdb::unique_ptr<CancelRequestMessage>(new CancelRequestMessage());
+	return result;
+}
+
 void DisconnectMessage::Serialize(Serializer &serializer) const {
 }
 

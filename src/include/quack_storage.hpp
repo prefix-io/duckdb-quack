@@ -32,6 +32,11 @@ public:
 	vector<QuackConnectionSnapshot> GetActiveConnectionSnaps();
 	vector<ServerSnapshot> ListServers();
 
+	//! Cancel the active query on `connection_id` across all served endpoints.
+	//! Throws on an unknown connection; otherwise surfaces CancelActiveQuery's
+	//! stale/no-active errors verbatim.
+	void CancelConnection(const string &connection_id, optional_idx expected_query_id);
+
 	static constexpr const char *STORAGE_EXTENSION_KEY = "quack";
 
 private:

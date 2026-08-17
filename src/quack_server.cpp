@@ -54,11 +54,15 @@ vector<QuackConnectionSnapshot> QuackServer::GetActiveConnectionSnap() {
 	std::lock_guard<std::mutex> lock(active_connections_mutex);
 	for (auto &conn_kv : active_connections) {
 		auto &conn = conn_kv.second;
+		// state_lock, not lock: the lifecycle metadata is guarded by the leaf state
+		// lock precisely so snapshots never park behind an executing query.
+		std::lock_guard<std::mutex> state_guard(conn->state_lock);
 		QuackConnectionSnapshot snapshot;
 		snapshot.session_id = conn->session_id;
 		snapshot.sql_query = conn->sql_query;
 		snapshot.query_state = conn->query_state;
 		snapshot.query_started_at = conn->query_started_at;
+		snapshot.negotiated_version = conn->negotiated_version;
 		result.push_back(std::move(snapshot));
 	}
 	return result;
@@ -73,7 +77,7 @@ shared_ptr<QuackConnection> QuackServer::GetConnection(const string &connection_
 	return nullptr;
 }
 
-string QuackServer::CreateNewConnection(const string &session_id) {
+string QuackServer::CreateNewConnection(const string &session_id, idx_t negotiated_version) {
 	std::lock_guard<std::mutex> lock(active_connections_mutex);
 
 	D_ASSERT(active_connections.find(session_id) == active_connections.end());
@@ -85,12 +89,13 @@ string QuackServer::CreateNewConnection(const string &session_id) {
 	auto new_connection = make_shared_ptr<QuackConnection>(session_id);
 	new_connection->duckdb_connection = make_uniq<Connection>(*db);
 	new_connection->duckdb_connection->context->config.enable_progress_bar = false;
+	new_connection->negotiated_version = negotiated_version;
 	// new_connection->duckdb_connection->context->config.streaming_buffer_size = 10 * 1000000; // 10 MB
 	active_connections[session_id] = std::move(new_connection);
 	return session_id;
 }
 
-bool QuackServer::DisconnectConnection(const string &session_id) {
+bool QuackServer::RemoveConnection(const string &session_id) {
 	std::lock_guard<std::mutex> lock(active_connections_mutex);
 
 	auto entry = active_connections.find(session_id);
@@ -100,6 +105,72 @@ bool QuackServer::DisconnectConnection(const string &session_id) {
 	}
 	active_connections.erase(entry);
 	return true;
+}
+
+void QuackServer::ReapIfLatched(QuackConnection &connection) {
+	{
+		std::lock_guard<std::mutex> state_guard(connection.state_lock);
+		if (!connection.disconnect_latched) {
+			return;
+		}
+		if (connection.query_state == QuackQueryState::ACTIVE ||
+		    connection.query_state == QuackQueryState::CANCELLING) {
+			// A query is still executing or unwinding. Leave the entry registered so
+			// quack_active_connections() (and admission accounting built on it) keeps
+			// seeing the work; the handler that unwinds it calls back here.
+			return;
+		}
+	}
+	RemoveConnection(connection.session_id);
+}
+
+string QuackServer::CancelActiveQuery(QuackConnection &connection, optional_idx expected_query_id,
+                                      bool require_active) {
+	idx_t observed_epoch;
+	{
+		std::lock_guard<std::mutex> state_guard(connection.state_lock);
+		if (expected_query_id.IsValid() && connection.active_client_query_id.IsValid() &&
+		    expected_query_id.GetIndex() != connection.active_client_query_id.GetIndex()) {
+			return "Cancellation rejected: stale query identity";
+		}
+		if (connection.query_state != QuackQueryState::ACTIVE &&
+		    connection.query_state != QuackQueryState::CANCELLING) {
+			return require_active ? "Cancellation rejected: no active query" : string();
+		}
+		observed_epoch = connection.query_epoch;
+		connection.query_state = QuackQueryState::CANCELLING;
+	}
+
+	// try_lock distinguishes the two shapes of an active query. A parked
+	// PREPARE/FETCH handler holds `lock` for its whole request, so failing to
+	// acquire it means a request thread is executing: interrupt and let it unwind
+	// (its error path transitions the state and triggers the latched reap). Owning
+	// the lock means the query is a suspended streaming result with no request in
+	// flight — nothing will ever unwind it, so tear it down right here.
+	std::unique_lock<std::mutex> exec_lock(connection.lock, std::try_to_lock);
+	if (!exec_lock.owns_lock()) {
+		connection.duckdb_connection->Interrupt();
+		return string();
+	}
+
+	bool still_same_query;
+	{
+		std::lock_guard<std::mutex> state_guard(connection.state_lock);
+		still_same_query =
+		    connection.query_epoch == observed_epoch && connection.query_state == QuackQueryState::CANCELLING;
+	}
+	if (still_same_query) {
+		connection.duckdb_query_result.reset();
+		// Rotate the result UUID: a late FETCH for the torn-down result must fail
+		// with "Result has been closed", not read a null result as a clean empty
+		// end-of-stream and silently truncate the client's data.
+		connection.result_uuid = UUID::GenerateRandomUUID();
+		std::lock_guard<std::mutex> state_guard(connection.state_lock);
+		if (connection.query_epoch == observed_epoch) {
+			connection.query_state = QuackQueryState::CANCELLED;
+		}
+	}
+	return string();
 }
 
 static string GetSettingString(DatabaseInstance &db, const string &setting_name) {
@@ -184,6 +255,7 @@ bool ServerSupportsMessage(MessageType type) {
 	case MessageType::FETCH_REQUEST:
 	case MessageType::APPEND_REQUEST:
 	case MessageType::DISCONNECT_MESSAGE:
+	case MessageType::CANCEL_REQUEST:
 		return true;
 	default:
 		return false;
@@ -235,6 +307,15 @@ unique_ptr<QuackMessage> QuackServer::HandleMessage(MemoryStream &read_stream) {
 		if (!connection) {
 			return make_uniq<ErrorResponse>("Invalid connection id");
 		}
+		// A disconnect-latched connection accepts no new work; it only remains
+		// registered so an unwinding query stays observable. DISCONNECT stays
+		// idempotent and CANCEL may still target the unwinding query.
+		if (header.type != MessageType::DISCONNECT_MESSAGE && header.type != MessageType::CANCEL_REQUEST) {
+			std::lock_guard<std::mutex> state_guard(connection->state_lock);
+			if (connection->disconnect_latched) {
+				return make_uniq<ErrorResponse>("Connection has been closed");
+			}
+		}
 	}
 
 	// now deserialize the actual message
@@ -242,6 +323,13 @@ unique_ptr<QuackMessage> QuackServer::HandleMessage(MemoryStream &read_stream) {
 
 	// process the message
 	auto response = HandleMessageInternal(*db, *received_message, connection);
+
+	// reap a latched connection once its query is no longer executing; while a
+	// query is active or unwinding the entry must stay visible to
+	// quack_active_connections() so admission accounting never undercounts.
+	if (connection) {
+		ReapIfLatched(*connection);
+	}
 
 	if (should_log) {
 		int64_t end_time = std::chrono::time_point_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now())
@@ -286,9 +374,14 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 	switch (received_message.Type()) {
 	case MessageType::CONNECTION_REQUEST: {
 		auto &connection_request_message = received_message.Cast<ConnectionRequestMessage>();
-		if (connection_request_message.MinimumSupportedQuackVersion() > 1ULL) {
-			return make_uniq<ErrorResponse>("Unsupported Quack version - server only supports version 1 of quack");
+		auto client_min = connection_request_message.MinimumSupportedQuackVersion();
+		auto client_max = connection_request_message.MaximumSupportedQuackVersion();
+		if (client_min > QuackServer::MAX_QUACK_VERSION || client_max < QuackServer::QUACK_VERSION ||
+		    client_min > client_max) {
+			return make_uniq<ErrorResponse>("Unsupported Quack version - server supports versions %llu through %llu",
+			                                QuackServer::QUACK_VERSION, QuackServer::MAX_QUACK_VERSION);
 		}
+		auto negotiated_version = MinValue<idx_t>(client_max, QuackServer::MAX_QUACK_VERSION);
 		string session_id = GenerateSessionId();
 		auto auth_result = EvaluateAuthQuery(
 		    db, StringUtil::Format("SELECT %s(?, ?, ?)", GetSettingString(db, "quack_authentication_function")),
@@ -298,12 +391,36 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		    (auth_result.type().id() == LogicalTypeId::BOOLEAN && !auth_result.GetValue<bool>())) {
 			return make_uniq<ErrorResponse>("Authentication failed");
 		}
-		return make_uniq<ConnectionResponseMessage>(CreateNewConnection(session_id));
+		return make_uniq<ConnectionResponseMessage>(CreateNewConnection(session_id, negotiated_version),
+		                                            negotiated_version);
 	}
 	case MessageType::DISCONNECT_MESSAGE: {
 		auto &connection = *connection_p;
-		if (!DisconnectConnection(connection.session_id)) {
-			return make_uniq<ErrorResponse>("Connection does not exist / already disconnected");
+		{
+			std::lock_guard<std::mutex> state_guard(connection.state_lock);
+			if (connection.disconnect_latched) {
+				// Latched means latched: repeated disconnects are idempotent successes.
+				return make_uniq<SuccessResponse>();
+			}
+			connection.disconnect_latched = true;
+		}
+		// Interrupt (parked request) or tear down (suspended result) any active
+		// query; an idle connection is simply reaped after this handler returns.
+		// require_active=false: disconnecting an idle connection is normal.
+		CancelActiveQuery(connection, optional_idx(), false);
+		return make_uniq<SuccessResponse>();
+	}
+	case MessageType::CANCEL_REQUEST: {
+		auto &connection = *connection_p;
+		{
+			std::lock_guard<std::mutex> state_guard(connection.state_lock);
+			if (connection.negotiated_version < 2) {
+				return make_uniq<ErrorResponse>("CANCEL_REQUEST requires negotiated protocol version 2 or higher");
+			}
+		}
+		auto error = CancelActiveQuery(connection, received_message.ClientQueryId(), true);
+		if (!error.empty()) {
+			return make_uniq<ErrorResponse>(error);
 		}
 		return make_uniq<SuccessResponse>();
 	}
@@ -322,23 +439,56 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		auto effective_sql = (auth_result.type().id() == LogicalTypeId::VARCHAR) ? auth_result.GetValue<string>()
 		                                                                         : prepare_request_message.Query();
 
+		// Publish the query's lifecycle metadata BEFORE acquiring the execution lock:
+		// from this point a cancellation can see and target the query, and the entry
+		// is admission-countable for its entire life.
+		idx_t my_epoch;
+		{
+			std::lock_guard<std::mutex> state_guard(connection.state_lock);
+			my_epoch = ++connection.query_epoch;
+			connection.sql_query = prepare_request_message.Query();
+			connection.query_state = QuackQueryState::ACTIVE;
+			connection.query_started_at = Timestamp::GetCurrentTimestamp();
+			connection.active_client_query_id = prepare_request_message.ClientQueryId();
+		}
+		// Terminal transitions are epoch-guarded: while this handler unwinds, a
+		// queued PREPARE may already have published the next query's metadata, and
+		// this handler must not stomp it.
+		auto transition = [&](QuackQueryState new_state, bool clear_sql) {
+			std::lock_guard<std::mutex> state_guard(connection.state_lock);
+			if (connection.query_epoch != my_epoch) {
+				return;
+			}
+			connection.query_state = new_state;
+			if (clear_sql) {
+				connection.sql_query = "";
+			}
+		};
+
 		std::unique_lock<std::mutex> lock(connection.lock);
+		// A cancel or disconnect may have raced in between metadata publication and
+		// lock acquisition; its interrupt would be consumed and reset by query
+		// startup, so it must be honored here instead of silently lost.
+		{
+			std::lock_guard<std::mutex> state_guard(connection.state_lock);
+			if (connection.query_epoch != my_epoch || connection.query_state != QuackQueryState::ACTIVE) {
+				if (connection.query_epoch == my_epoch && connection.query_state == QuackQueryState::CANCELLING) {
+					connection.query_state = QuackQueryState::CANCELLED;
+				}
+				return make_uniq<ErrorResponse>("Query was cancelled before execution started");
+			}
+		}
 		connection.duckdb_query_result.reset();
-		connection.sql_query = prepare_request_message.Query();
-		connection.query_state = QuackQueryState::ACTIVE;
-		connection.query_started_at = Timestamp::GetCurrentTimestamp();
 
 		{
 			auto query_result = connection.duckdb_connection->SendQuery(effective_sql);
 			if (query_result->HasError()) {
 				// TODO; instead of cancelled, add an ERROR state
-				connection.query_state = QuackQueryState::CANCELLED;
-				connection.sql_query = "";
+				transition(QuackQueryState::CANCELLED, true);
 				return make_uniq<ErrorResponse>(query_result->GetErrorObject());
 			}
 			if (query_result->names.empty()) {
-				connection.query_state = QuackQueryState::CANCELLED;
-				connection.sql_query = "";
+				transition(QuackQueryState::CANCELLED, true);
 				return make_uniq<ErrorResponse>("Query did not return any columns");
 			}
 
@@ -363,11 +513,15 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 
 			auto error_message = connection.duckdb_query_result->GetErrorObject();
 			connection.duckdb_query_result.reset();
+			// Includes interrupt-driven unwinds: without this transition the entry
+			// stayed ACTIVE forever after any mid-stream error, permanently occupying
+			// an admission slot.
+			transition(QuackQueryState::CANCELLED, false);
 			return make_uniq<ErrorResponse>(std::move(error_message));
 		}
 		auto needs_more_fetch = results.size() == max_chunks_per_batch;
 		if (!needs_more_fetch) {
-			connection.query_state = QuackQueryState::FINISHED;
+			transition(QuackQueryState::FINISHED, false);
 		}
 		return make_uniq<PrepareResponseMessage>(types, names, std::move(results), needs_more_fetch,
 		                                         connection.result_uuid);
@@ -378,6 +532,20 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		auto &connection = *connection_p;
 		std::unique_lock<std::mutex> lock(connection.lock);
 
+		// Same epoch guard as PREPARE: this fetch's state transitions apply only to
+		// the query that was current when the lock was acquired.
+		idx_t my_epoch;
+		{
+			std::lock_guard<std::mutex> state_guard(connection.state_lock);
+			my_epoch = connection.query_epoch;
+		}
+		auto transition = [&](QuackQueryState new_state) {
+			std::lock_guard<std::mutex> state_guard(connection.state_lock);
+			if (connection.query_epoch == my_epoch) {
+				connection.query_state = new_state;
+			}
+		};
+
 		if (connection.result_uuid != fetch_request_message.uuid) {
 			return make_uniq<ErrorResponse>("Result has been closed");
 		}
@@ -385,6 +553,7 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 			return make_uniq<FetchResponseMessage>();
 		}
 		if (connection.duckdb_query_result->HasError()) {
+			transition(QuackQueryState::CANCELLED);
 			return make_uniq<ErrorResponse>(connection.duckdb_query_result->GetErrorObject());
 		}
 
@@ -397,11 +566,14 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 			D_ASSERT(results.empty());
 			auto error_message = connection.duckdb_query_result->GetErrorObject();
 			connection.duckdb_query_result.reset();
+			// Interrupt-driven and ordinary mid-stream errors alike must leave a
+			// terminal state, or the entry occupies an admission slot forever.
+			transition(QuackQueryState::CANCELLED);
 			return make_uniq<ErrorResponse>(std::move(error_message));
 		}
 		auto assigned_batch_index = connection.next_batch_index++;
 		if (results.size() < max_chunks_per_batch) {
-			connection.query_state = QuackQueryState::FINISHED;
+			transition(QuackQueryState::FINISHED);
 		}
 		return make_uniq<FetchResponseMessage>(std::move(results), optional_idx(assigned_batch_index));
 	}
