@@ -168,6 +168,11 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "enforce (cancel queries whose client socket died)",
 	                          LogicalType::VARCHAR, Value("observe"));
 
+	config.AddExtensionOption("quack_lease",
+	                          "Lease handling for v3+ connections whose client stopped heartbeating: off, observe "
+	                          "(count/log only), or enforce (latch, cancel and reap the connection)",
+	                          LogicalType::VARCHAR, Value("observe"));
+
 	// Process-wide fallback anchor for whoami().uptime when whoami_started_at isn't set.
 	// Stored as BIGINT epoch-microseconds to stay TZ-invariant regardless of ICU state.
 	config.AddExtensionOption("quack_loaded_at_us", "Epoch microseconds at extension load", LogicalType::BIGINT,

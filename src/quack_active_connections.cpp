@@ -39,10 +39,21 @@ struct QuackActiveConnectionsData : FunctionData {
 
 static unique_ptr<FunctionData> QuackActiveConnectionsBind(ClientContext &, TableFunctionBindInput &,
                                                            vector<LogicalType> &return_types, vector<string> &names) {
-	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
-	                LogicalType::TIMESTAMP, LogicalType::BIGINT};
-	names = {"server_id", "connection_id", "query", "state", "query_started_at", "protocol_version"};
+	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
+	                LogicalType::VARCHAR, LogicalType::TIMESTAMP, LogicalType::BIGINT,
+	                LogicalType::BIGINT,  LogicalType::VARCHAR,   LogicalType::BIGINT};
+	names = {"server_id",        "connection_id",   "query",       "state",       "query_started_at",
+	         "protocol_version", "client_query_id", "lease_state", "lease_age_seconds"};
 	return make_uniq<QuackActiveConnectionsData>();
+}
+
+static string LeaseStateToString(const QuackConnectionSnapshot &snap) {
+	if (snap.negotiated_version < 3) {
+		// Pre-heartbeat protocol: the connection carries no lease.
+		return "n/a";
+	}
+	return snap.lease_age_seconds >= static_cast<int64_t>(QuackLeaseReaper::LEASE_DURATION_MS / 1000) ? "expired"
+	                                                                                                  : "live";
 }
 
 static void QuackActiveConnectionsScan(ClientContext &context, TableFunctionInput &input, DataChunk &output) {
@@ -65,6 +76,17 @@ static void QuackActiveConnectionsScan(ClientContext &context, TableFunctionInpu
 			output.SetValue(4, row, Value::TIMESTAMP(snap.query_started_at));
 		}
 		output.SetValue(5, row, Value::BIGINT(NumericCast<int64_t>(snap.negotiated_version)));
+		if (snap.active_client_query_id.IsValid()) {
+			output.SetValue(6, row, Value::BIGINT(NumericCast<int64_t>(snap.active_client_query_id.GetIndex())));
+		} else {
+			output.SetValue(6, row, Value(LogicalType::BIGINT));
+		}
+		output.SetValue(7, row, Value(LeaseStateToString(snap)));
+		if (snap.lease_age_seconds >= 0) {
+			output.SetValue(8, row, Value::BIGINT(snap.lease_age_seconds));
+		} else {
+			output.SetValue(8, row, Value(LogicalType::BIGINT));
+		}
 		row++;
 	}
 	output.SetCardinality(row);

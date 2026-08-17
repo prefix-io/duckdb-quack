@@ -1,5 +1,8 @@
 #pragma once
 
+#include <condition_variable>
+#include <thread>
+
 #include "duckdb/common/http_util.hpp"
 #include "duckdb/logging/logger.hpp"
 #include "duckdb/common/serializer/memory_stream.hpp"
@@ -99,7 +102,16 @@ public:
 	//! Return a client back to the cache
 	void StoreClient(unique_ptr<QuackClient> client_p) const;
 
+	//! Start the background heartbeat thread (v3+ servers only). Beats every
+	//! ~LEASE/3 on a one-shot client so the server's lease never lapses while
+	//! this connection object is alive — including while a streaming result is
+	//! suspended between FETCHes or the consumer is simply slow.
+	void StartHeartbeat(DatabaseInstance &db);
+
 private:
+	void StopHeartbeat();
+	void HeartbeatLoop();
+
 	QuackUri uri;
 	string connection_id;
 	idx_t negotiated_version;
@@ -107,6 +119,14 @@ private:
 	mutable mutex lock;
 	mutable vector<unique_ptr<QuackClient>> cached_clients;
 	idx_t max_connections_cached;
+
+	//! weak_ptr, not shared_ptr: catalog-owned connections are transitively owned
+	//! by the DatabaseInstance itself, so pinning it here would be a cycle.
+	weak_ptr<DatabaseInstance> heartbeat_db;
+	std::mutex heartbeat_mutex;
+	std::condition_variable heartbeat_cv;
+	std::thread heartbeat_thread;
+	bool heartbeat_stop = false;
 };
 
 struct QuackClientWrapper {

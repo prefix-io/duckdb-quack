@@ -21,6 +21,10 @@ enum class MessageType : uint8_t {
 	//! identified by the header's connection_id + client_query_id; a stale or
 	//! mismatched client_query_id is rejected rather than cancelling newer work.
 	CANCEL_REQUEST = 12,
+	//! v3+: lease renewal. Any valid message renews the connection's lease; the
+	//! client's background thread sends this when it would otherwise be silent, so
+	//! a lease that lapses means the client process is gone (Layer 3 backstop).
+	HEARTBEAT = 13,
 	ERROR_RESPONSE = 100
 };
 
@@ -359,6 +363,20 @@ public:
 
 protected:
 	CancelRequestMessage() : QuackMessage(TYPE) {
+	}
+};
+
+class HeartbeatMessage : public QuackMessage {
+public:
+	static constexpr MessageType TYPE = MessageType::HEARTBEAT;
+
+	explicit HeartbeatMessage(string connection_id_p) : QuackMessage(TYPE, std::move(connection_id_p)) {};
+
+	void Serialize(Serializer &serializer) const override;
+	static unique_ptr<HeartbeatMessage> Deserialize(Deserializer &deserializer);
+
+protected:
+	HeartbeatMessage() : QuackMessage(TYPE) {
 	}
 };
 

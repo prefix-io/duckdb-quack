@@ -33,6 +33,8 @@ QuackServer::QuackServer(ClientContext &context_p, const QuackUri &uri_p, const 
 	ValidateToken(token);
 	socket_watch = make_uniq<QuackSocketWatch>(db_ptr);
 	socket_watch->Start();
+	lease_reaper = make_uniq<QuackLeaseReaper>(*this, db_ptr);
+	lease_reaper->Start();
 }
 
 string QuackServer::TokenFromSecret(ClientContext &context, const QuackUri &uri) {
@@ -49,6 +51,11 @@ string QuackServer::TokenFromSecret(ClientContext &context, const QuackUri &uri)
 }
 
 QuackServer::~QuackServer() {
+	// Join the reaper before the socket watch and registry go away; it holds a
+	// bare reference to this server.
+	if (lease_reaper) {
+		lease_reaper->Stop();
+	}
 	if (socket_watch) {
 		socket_watch->Stop();
 	}
@@ -56,6 +63,7 @@ QuackServer::~QuackServer() {
 
 vector<QuackConnectionSnapshot> QuackServer::GetActiveConnectionSnap() {
 	vector<QuackConnectionSnapshot> result;
+	auto now = std::chrono::steady_clock::now();
 	std::lock_guard<std::mutex> lock(active_connections_mutex);
 	for (auto &conn_kv : active_connections) {
 		auto &conn = conn_kv.second;
@@ -68,7 +76,22 @@ vector<QuackConnectionSnapshot> QuackServer::GetActiveConnectionSnap() {
 		snapshot.query_state = conn->query_state;
 		snapshot.query_started_at = conn->query_started_at;
 		snapshot.negotiated_version = conn->negotiated_version;
+		snapshot.active_client_query_id = conn->active_client_query_id;
+		if (conn->negotiated_version >= 3) {
+			snapshot.lease_age_seconds =
+			    std::chrono::duration_cast<std::chrono::seconds>(now - conn->last_traffic).count();
+		}
 		result.push_back(std::move(snapshot));
+	}
+	return result;
+}
+
+vector<shared_ptr<QuackConnection>> QuackServer::SnapshotConnections() {
+	vector<shared_ptr<QuackConnection>> result;
+	std::lock_guard<std::mutex> lock(active_connections_mutex);
+	result.reserve(active_connections.size());
+	for (auto &conn_kv : active_connections) {
+		result.push_back(conn_kv.second);
 	}
 	return result;
 }
@@ -266,6 +289,7 @@ bool ServerSupportsMessage(MessageType type) {
 	case MessageType::APPEND_REQUEST:
 	case MessageType::DISCONNECT_MESSAGE:
 	case MessageType::CANCEL_REQUEST:
+	case MessageType::HEARTBEAT:
 		return true;
 	default:
 		return false;
@@ -344,11 +368,20 @@ unique_ptr<QuackMessage> QuackServer::HandleMessage(MemoryStream &read_stream,
 		}
 		// A disconnect-latched connection accepts no new work; it only remains
 		// registered so an unwinding query stays observable. DISCONNECT stays
-		// idempotent and CANCEL may still target the unwinding query.
-		if (header.type != MessageType::DISCONNECT_MESSAGE && header.type != MessageType::CANCEL_REQUEST) {
+		// idempotent and CANCEL may still target the unwinding query. Heartbeats
+		// deliberately get the error too: latched means latched, a late beat must
+		// not look like a live connection.
+		{
 			std::lock_guard<std::mutex> state_guard(connection->state_lock);
 			if (connection->disconnect_latched) {
-				return make_uniq<ErrorResponse>("Connection has been closed");
+				if (header.type != MessageType::DISCONNECT_MESSAGE && header.type != MessageType::CANCEL_REQUEST) {
+					return make_uniq<ErrorResponse>("Connection has been closed");
+				}
+			} else {
+				// Every valid routed message renews the lease; heartbeats exist only
+				// for the windows in which the client sends nothing else.
+				connection->last_traffic = std::chrono::steady_clock::now();
+				connection->lease_expiry_reported = false;
 			}
 		}
 	}
@@ -441,6 +474,7 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 	}
 	case MessageType::DISCONNECT_MESSAGE: {
 		auto &connection = *connection_p;
+		disconnects_received++;
 		{
 			std::lock_guard<std::mutex> state_guard(connection.state_lock);
 			if (connection.disconnect_latched) {
@@ -457,6 +491,7 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 	}
 	case MessageType::CANCEL_REQUEST: {
 		auto &connection = *connection_p;
+		cancel_requests_received++;
 		{
 			std::lock_guard<std::mutex> state_guard(connection.state_lock);
 			if (connection.negotiated_version < 2) {
@@ -467,6 +502,18 @@ unique_ptr<QuackMessage> QuackServer::HandleMessageInternal(DatabaseInstance &db
 		if (!error.empty()) {
 			return make_uniq<ErrorResponse>(error);
 		}
+		return make_uniq<SuccessResponse>();
+	}
+	case MessageType::HEARTBEAT: {
+		auto &connection = *connection_p;
+		{
+			std::lock_guard<std::mutex> state_guard(connection.state_lock);
+			if (connection.negotiated_version < 3) {
+				return make_uniq<ErrorResponse>("HEARTBEAT requires negotiated protocol version 3 or higher");
+			}
+		}
+		// The lease was already renewed during message routing; a heartbeat has no
+		// other effect.
 		return make_uniq<SuccessResponse>();
 	}
 	case MessageType::PREPARE_REQUEST: {

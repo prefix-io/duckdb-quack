@@ -47,6 +47,10 @@ vector<QuackStorageExtensionInfo::ServerSnapshot> QuackStorageExtensionInfo::Lis
 		snap.info.emplace_back("ipv6", uri.IPv6() ? "true" : "false");
 		snap.info.emplace_back("socket_liveness_detected", std::to_string(kv.second->SocketLivenessDetected()));
 		snap.info.emplace_back("socket_liveness_cancelled", std::to_string(kv.second->SocketLivenessCancelled()));
+		snap.info.emplace_back("lease_expired_detected", std::to_string(kv.second->LeaseExpiredDetected()));
+		snap.info.emplace_back("lease_expired_reaped", std::to_string(kv.second->LeaseExpiredReaped()));
+		snap.info.emplace_back("cancel_requests_received", std::to_string(kv.second->CancelRequestsReceived()));
+		snap.info.emplace_back("disconnects_received", std::to_string(kv.second->DisconnectsReceived()));
 		result.push_back(std::move(snap));
 	}
 	return result;

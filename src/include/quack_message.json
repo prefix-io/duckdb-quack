@@ -69,6 +69,10 @@
     "members": []
   },
   {
+    "class": "HeartbeatMessage",
+    "members": []
+  },
+  {
     "class": "PrepareResponseMessage",
     "members": [
       {

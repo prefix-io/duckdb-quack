@@ -1,5 +1,5 @@
 # name: test/sql/cancel_and_negotiation.test
-# description: protocol v2 negotiation surface + quack_cancel_connection error paths
+# description: protocol negotiation surface + quack_cancel_connection error paths
 # group: [sql]
 
 require quack
@@ -14,19 +14,31 @@ create table fuu as values(42, 43);
 statement ok con1
 call quack_serve('quack:localhost', token='asdf');
 
-# fork client against fork server negotiates protocol v2
+# fork client against fork server negotiates protocol v3 (targeted cancel + lease)
 statement ok con2
 attach 'quack:localhost' as rpc2 (token 'asdf');
 
 query I con1
 select protocol_version from quack_active_connections();
 ----
-2
+3
+
+# a fresh v3 connection carries a live lease (the client heartbeats in the background)
+query II con1
+select lease_state, lease_age_seconds < 60 from quack_active_connections();
+----
+live	true
 
 query II con2
 from rpc2.fuu;
 ----
 42	43
+
+# every PREPARE stamps a client query identity; it is what targeted cancel matches on
+query I con1
+select client_query_id is not null from quack_active_connections();
+----
+true
 
 # cancelling an unknown connection fails loudly
 statement error con1

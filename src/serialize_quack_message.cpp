@@ -63,6 +63,14 @@ unique_ptr<CancelRequestMessage> CancelRequestMessage::Deserialize(Deserializer 
 	return result;
 }
 
+void HeartbeatMessage::Serialize(Serializer &serializer) const {
+}
+
+unique_ptr<HeartbeatMessage> HeartbeatMessage::Deserialize(Deserializer &deserializer) {
+	auto result = duckdb::unique_ptr<HeartbeatMessage>(new HeartbeatMessage());
+	return result;
+}
+
 void DisconnectMessage::Serialize(Serializer &serializer) const {
 }
 

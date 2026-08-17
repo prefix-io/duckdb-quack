@@ -96,6 +96,24 @@ HttpQuackServer::HttpQuackServer(ClientContext &context_p, const QuackUri &uri_p
 	server->new_task_queue = [] {
 		return new duckdb_httplib::ThreadPool(128);
 	};
+	// Without this, a handler exception is a bare 500 with an empty body —
+	// undebuggable from the client side. The message is server-internal but this
+	// endpoint is token-gated infrastructure, not a public surface.
+	server->set_exception_handler(
+	    [](const duckdb_httplib::Request &, duckdb_httplib::Response &res, std::exception_ptr ep) {
+		    string message = "unknown exception";
+		    try {
+			    if (ep) {
+				    std::rethrow_exception(ep);
+			    }
+		    } catch (std::exception &ex) {
+			    message = ex.what();
+		    } catch (...) { // NOLINT
+		    }
+		    fprintf(stderr, "quack server handler exception: %s\n", message.c_str());
+		    res.status = 500;
+		    res.set_content("Quack server error: " + message, "text/plain");
+	    });
 	server->set_keep_alive_max_count(128);
 	server->set_keep_alive_timeout(10);
 	server->set_tcp_nodelay(true);

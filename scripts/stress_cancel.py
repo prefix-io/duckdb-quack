@@ -44,6 +44,7 @@ def main() -> int:
 
   server = open_connection(args.repo)
   server.execute("SET GLOBAL quack_socket_liveness = 'enforce'")
+  server.execute("SET GLOBAL quack_lease = 'enforce'")
   server.execute("CREATE TABLE t AS SELECT range AS id FROM range(2000000)")
   server.execute(f"CALL quack_serve('quack:localhost:{PORT}', token := '{TOKEN}', disable_ssl := true)")
   server_lock = threading.Lock()

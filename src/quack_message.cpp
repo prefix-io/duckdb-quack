@@ -54,6 +54,9 @@ MessageType EnumUtil::FromString<MessageType>(const char *value) {
 	if (StringUtil::Equals(value, "CANCEL_REQUEST")) {
 		return MessageType::CANCEL_REQUEST;
 	}
+	if (StringUtil::Equals(value, "HEARTBEAT")) {
+		return MessageType::HEARTBEAT;
+	}
 	if (StringUtil::Equals(value, "ERROR_RESPONSE")) {
 		return MessageType::ERROR_RESPONSE;
 	}
@@ -64,6 +67,10 @@ MessageType EnumUtil::FromString<MessageType>(const char *value) {
 template <>
 const char *EnumUtil::ToChars<MessageType>(MessageType value) {
 	switch (value) {
+	// INVALID must be here: the socket-watch/lease log paths stringify
+	// MessageType::INVALID, and a missing case throws on a bare thread → terminate.
+	case MessageType::INVALID:
+		return "INVALID";
 	case MessageType::CONNECTION_REQUEST:
 		return "CONNECTION_REQUEST";
 	case MessageType::CONNECTION_RESPONSE:
@@ -84,6 +91,8 @@ const char *EnumUtil::ToChars<MessageType>(MessageType value) {
 		return "DISCONNECT_MESSAGE";
 	case MessageType::CANCEL_REQUEST:
 		return "CANCEL_REQUEST";
+	case MessageType::HEARTBEAT:
+		return "HEARTBEAT";
 	case MessageType::ERROR_RESPONSE:
 		return "ERROR_RESPONSE";
 
@@ -131,6 +140,8 @@ unique_ptr<QuackMessage> QuackMessage::Deserialize(Deserializer &deserializer, M
 		return DisconnectMessage::Deserialize(deserializer);
 	case MessageType::CANCEL_REQUEST:
 		return CancelRequestMessage::Deserialize(deserializer);
+	case MessageType::HEARTBEAT:
+		return HeartbeatMessage::Deserialize(deserializer);
 	case MessageType::ERROR_RESPONSE:
 		return ErrorResponse::Deserialize(deserializer);
 	default:

@@ -1,10 +1,13 @@
 #pragma once
 
+#include <atomic>
+#include <chrono>
 #include <thread>
 
 #include "duckdb/common/optional_ptr.hpp"
 #include "duckdb/common/shared_ptr.hpp"
 
+#include "quack_lease_reaper.hpp"
 #include "quack_socket_watch.hpp"
 #include "quack_uri.hpp"
 
@@ -54,14 +57,21 @@ struct QuackConnection {
 	//! Incremented at every PREPARE. Lets a cancellation verify that the query it
 	//! observed is still the query it is about to tear down (completion races).
 	idx_t query_epoch = 0;
-	//! Latched by DISCONNECT. Once set the connection accepts no new work and is
-	//! reaped from the registry as soon as any in-flight query unwinds. Latched
-	//! means latched — it is never cleared.
+	//! Latched by DISCONNECT or lease expiry. Once set the connection accepts no
+	//! new work and is reaped from the registry as soon as any in-flight query
+	//! unwinds. Latched means latched — it is never cleared, so a late heartbeat
+	//! can never revive an expired connection.
 	bool disconnect_latched = false;
 	//! Protocol version negotiated at CONNECTION_REQUEST (min of client max and
-	//! server max). Version-gated behavior (targeted cancel, future lease expiry)
-	//! applies only to connections that negotiated >= 2.
+	//! server max). Version-gated behavior applies only to connections that
+	//! negotiated it: targeted cancel >= 2, heartbeats/lease expiry >= 3.
 	idx_t negotiated_version = 1;
+	//! Last time any valid message was routed to this connection (monotonic —
+	//! immune to wall-clock jumps). The lease reaper compares against it.
+	std::chrono::steady_clock::time_point last_traffic = std::chrono::steady_clock::now();
+	//! An expired lease is counted/logged once, not once per sweep; renewal
+	//! (a SIGSTOP'd client resuming) re-arms it.
+	bool lease_expiry_reported = false;
 };
 
 struct QuackConnectionSnapshot {
@@ -71,14 +81,20 @@ struct QuackConnectionSnapshot {
 	QuackQueryState query_state = QuackQueryState::IDLE;
 	timestamp_t query_started_at {0};
 	idx_t negotiated_version = 1;
+	optional_idx active_client_query_id;
+	//! Seconds since the connection's last valid message; -1 for connections that
+	//! negotiated < 3 (they carry no lease).
+	int64_t lease_age_seconds = -1;
 };
 
 class QuackServer {
 public:
 	static constexpr const idx_t QUACK_VERSION = 1;
 	//! Highest protocol version this build speaks. v2 adds targeted cancellation
-	//! (CANCEL_REQUEST); the selected version is min(client max, MAX_QUACK_VERSION).
-	static constexpr const idx_t MAX_QUACK_VERSION = 2;
+	//! (CANCEL_REQUEST); v3 adds heartbeats and lease expiry (HEARTBEAT). The
+	//! selected version is min(client max, MAX_QUACK_VERSION), so "the client
+	//! heartbeats" and "the server may lease-reap" are the same negotiated fact.
+	static constexpr const idx_t MAX_QUACK_VERSION = 3;
 
 public:
 	explicit QuackServer(ClientContext &context_p, const QuackUri &uri_p, const string &token_p);
@@ -121,6 +137,22 @@ public:
 	idx_t SocketLivenessCancelled() {
 		return socket_watch ? socket_watch->CancelledCount() : 0;
 	}
+	idx_t LeaseExpiredDetected() {
+		return lease_reaper ? lease_reaper->ExpiredDetected() : 0;
+	}
+	idx_t LeaseExpiredReaped() {
+		return lease_reaper ? lease_reaper->ExpiredReaped() : 0;
+	}
+	idx_t CancelRequestsReceived() {
+		return cancel_requests_received.load();
+	}
+	idx_t DisconnectsReceived() {
+		return disconnects_received.load();
+	}
+
+	//! Registry snapshot for the lease reaper: connection objects only, no state
+	//! reads — the reaper inspects each connection under its own state_lock.
+	vector<shared_ptr<QuackConnection>> SnapshotConnections();
 
 	string GenerateSessionId();
 
@@ -162,6 +194,10 @@ protected:
 protected:
 	std::vector<std::thread> listen_threads;
 	unique_ptr<QuackSocketWatch> socket_watch;
+	unique_ptr<QuackLeaseReaper> lease_reaper;
+	//! Cancellation-cause accounting, exposed via quack_server_list() info.
+	std::atomic<idx_t> cancel_requests_received {0};
+	std::atomic<idx_t> disconnects_received {0};
 
 	weak_ptr<DatabaseInstance> db_ptr;
 	mutex active_connections_mutex;

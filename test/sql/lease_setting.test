@@ -1,0 +1,51 @@
+# name: test/sql/lease_setting.test
+# description: quack_lease setting surface (expiry behavior is validated by the subprocess probe suite)
+# group: [sql]
+
+require quack
+
+require httpfs
+
+# rollout default is observe: visible, never destructive
+query I
+select current_setting('quack_lease');
+----
+observe
+
+statement ok
+set global quack_lease = 'enforce';
+
+query I
+select current_setting('quack_lease');
+----
+enforce
+
+statement ok
+set global quack_lease = 'off';
+
+statement ok
+set global quack_lease = 'observe';
+
+# the lease + cancellation-cause counters ride along on quack_server_list
+statement ok
+call quack_serve('quack:localhost', token='asdf');
+
+query IIII
+select info['lease_expired_detected'], info['lease_expired_reaped'], info['cancel_requests_received'], info['disconnects_received'] from quack_server_list();
+----
+0	0	0	0
+
+# a connect + disconnect cycle is counted as a disconnect cause
+statement ok con2
+attach 'quack:localhost' as rpc_lease (token 'asdf');
+
+statement ok con2
+detach rpc_lease;
+
+query I
+select info['disconnects_received'] from quack_server_list();
+----
+1
+
+statement ok
+call quack_stop('quack:localhost');

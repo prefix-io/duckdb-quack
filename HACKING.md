@@ -23,32 +23,44 @@ DuckDB-style extension repository under `build/release/repository/`.
 
 ## Validation checklist (run all of these before publishing)
 
-1. **SQL logic tests** — the full suite, including cancellation/negotiation and
-   socket-liveness setting coverage:
+1. **SQL logic tests** — the full suite, including cancellation/negotiation,
+   socket-liveness and lease setting coverage:
 
    ```sh
    make test
    ```
 
 2. **Cancel/complete race stress** — 1,000 iterations racing operator cancels
-   and client interrupts against completion; fails on any hang, unexpected
-   error, or leaked registry entry:
+   and client interrupts against completion, with socket liveness AND the lease
+   in enforce; fails on any hang, unexpected error, or leaked registry entry:
 
    ```sh
    python3 scripts/stress_cancel.py 1000
    ```
 
-3. **Behavior probes** — real server + client subprocesses covering SIGKILL
-   mid-query, kill-between-fetches, local interrupt, operator cancel, SIGSTOP
-   (false-positive guard), and iptables-silenced partition (keepalive). The
-   probe harness lives in the mono working notes; results to date are recorded
-   in `docs/plans/duckdb-quack-phase0-findings.md` (mono). Re-run at minimum the
-   SIGKILL-mid-CTAS enforce probe and the SIGSTOP probe when touching the
-   socket-liveness or cancellation paths.
+3. **Lease probes** — real server + real client subprocesses covering
+   kill-between-fetches (enforce reaps ≤75s / observe counts only — the Canyon
+   leak), a slow consumer pausing 3× the lease (heartbeats keep it alive),
+   SIGSTOP false-positive guard, and an old v2 client that must never be
+   lease-reaped:
 
-4. **Caveat when testing by hand:** `INSTALL quack FROM <repo>` silently keeps a
+   ```sh
+   python3 scripts/probe_lease.py            # all (~7 min)
+   python3 scripts/probe_lease.py sigstop    # one scenario
+   ```
+
+4. **Layer 1/2 behavior probes** — real server + client subprocesses covering
+   SIGKILL mid-query, local interrupt, operator cancel, and iptables-silenced
+   partition (keepalive). The ad-hoc harness and results to date are recorded
+   in `docs/plans/duckdb-quack-phase0-findings.md` (mono). Re-run at minimum the
+   SIGKILL-mid-CTAS enforce probe when touching the socket-liveness or
+   cancellation paths.
+
+5. **Caveat when testing by hand:** `INSTALL quack FROM <repo>` silently keeps a
    previously cached extension — always `FORCE INSTALL quack FROM
-   '<...>/build/release/repository'` or you are validating a stale binary.
+   '<...>/build/release/repository'` or you are validating a stale binary. Also
+   `LOAD httpfs` on the *server* connection: session-id generation needs its
+   crypto module, and without it every CONNECTION_REQUEST 500s.
 
 ## Releasing artifacts for mono
 
@@ -77,5 +89,15 @@ benchmark tooling all read that one file.
   `state_lock` comment in `quack_server.hpp` before touching locking.
 - Socket liveness: `src/quack_socket_watch.cpp`; modes via the
   `quack_socket_liveness` setting (`off`/`observe`/`enforce`, default observe).
+- Lease/heartbeat (Layer 3): server sweep in `src/quack_lease_reaper.cpp`
+  (60s lease, 15s sweep), client heartbeat thread in
+  `QuackClientConnection::HeartbeatLoop` (`src/quack_client.cpp`, ~20s); modes
+  via the `quack_lease` setting (`off`/`observe`/`enforce`, default observe).
+  Both watcher settings are read from background threads with no session, so
+  only `SET GLOBAL` is visible to them.
 - Client interrupt path: `HttpsQuackClient::RequestInternal` in
   `src/quack_client.cpp`.
+- Protocol versions: v2 = targeted CANCEL_REQUEST, v3 = HEARTBEAT + lease
+  reaping. `MAX_QUACK_VERSION` in `src/include/quack_server.hpp` is the single
+  constant both sides negotiate on; lease reaping is gated on ">= 3" so a
+  server only ever reaps clients that are able to heartbeat.

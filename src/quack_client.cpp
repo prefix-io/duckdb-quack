@@ -276,11 +276,69 @@ QuackClientConnection::QuackClientConnection(unique_ptr<QuackClient> client_p, Q
 }
 
 QuackClientConnection::~QuackClientConnection() {
+	// Join the heartbeat thread first: it reads uri/connection_id and must not
+	// outlive them (or beat for a connection that just disconnected).
+	StopHeartbeat();
 	if (!cached_clients.empty()) {
 		try {
 			auto &client = cached_clients.back();
 			client->Request<SuccessResponse>(nullptr, make_uniq<DisconnectMessage>(connection_id));
 		} catch (...) {
+		}
+	}
+}
+
+//! Client heartbeat cadence: LEASE/3, so two consecutive beats can be lost
+//! (slow network, server busy) before the 60s lease lapses.
+static constexpr const idx_t HEARTBEAT_INTERVAL_MS = 20000;
+
+void QuackClientConnection::StartHeartbeat(DatabaseInstance &db) {
+	if (negotiated_version < 3) {
+		return;
+	}
+	std::lock_guard<std::mutex> guard(heartbeat_mutex);
+	if (heartbeat_thread.joinable()) {
+		return;
+	}
+	heartbeat_db = db.shared_from_this();
+	heartbeat_stop = false;
+	heartbeat_thread = std::thread([this]() { HeartbeatLoop(); });
+}
+
+void QuackClientConnection::StopHeartbeat() {
+	{
+		std::lock_guard<std::mutex> guard(heartbeat_mutex);
+		if (!heartbeat_thread.joinable()) {
+			return;
+		}
+		heartbeat_stop = true;
+		heartbeat_cv.notify_all();
+	}
+	heartbeat_thread.join();
+}
+
+void QuackClientConnection::HeartbeatLoop() {
+	while (true) {
+		{
+			std::unique_lock<std::mutex> guard(heartbeat_mutex);
+			heartbeat_cv.wait_for(guard, std::chrono::milliseconds(HEARTBEAT_INTERVAL_MS),
+			                      [this]() { return heartbeat_stop; });
+			if (heartbeat_stop) {
+				return;
+			}
+		}
+		auto db = heartbeat_db.lock();
+		if (!db) {
+			return;
+		}
+		// One-shot client with a short timeout, exactly like the interrupt-cancel
+		// path: a beat must never queue behind a parked request's request_mutex,
+		// and a dead server must not park this thread for the default timeout.
+		try {
+			auto client = QuackClient::GetClient(*db, uri);
+			client->SetRequestTimeoutSeconds(10);
+			client->Request<SuccessResponse>(nullptr, make_uniq<HeartbeatMessage>(connection_id));
+		} catch (...) { // NOLINT: heartbeats are best-effort; missing one is recovered by the next
 		}
 	}
 }
@@ -305,8 +363,12 @@ shared_ptr<QuackClientConnection> QuackClient::ConnectToServer(ClientContext &co
 	// construct the client connection and return it
 	auto connection_id = connection_request_response->ConnectionId();
 	auto negotiated_version = connection_request_response->QuackVersion();
-	return make_shared_ptr<QuackClientConnection>(std::move(client), uri, std::move(connection_id),
-	                                              negotiated_version);
+	auto connection = make_shared_ptr<QuackClientConnection>(std::move(client), uri, std::move(connection_id),
+	                                                         negotiated_version);
+	// v3+ servers lease-reap silent connections; keep ours alive for as long as
+	// this connection object exists.
+	connection->StartHeartbeat(*context.db);
+	return connection;
 }
 
 unique_ptr<QuackClientWrapper> QuackClientConnection::GetClient(ClientContext &context) const {
