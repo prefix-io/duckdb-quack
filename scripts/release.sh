@@ -31,9 +31,9 @@ if [[ -n $(git status --porcelain -- src test scripts) ]]; then
   echo "WARNING: working tree differs from HEAD; the artifact is built from the pushed commit only." >&2
 fi
 
-rm -rf out
 mkdir -p out
 for arch in "${ARCHES[@]}"; do
+  rm -rf "out/linux_${arch}" "out/quack-duckdb_v1.5.5-linux_${arch}.duckdb_extension"
   echo "=== building linux/${arch} from ${COMMIT} ==="
   docker buildx build \
     --platform "linux/${arch}" \
