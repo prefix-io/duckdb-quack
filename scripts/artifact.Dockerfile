@@ -1,8 +1,13 @@
 # Clean-room artifact build: clones a pushed commit (never the working tree) so
 # every published extension binary is traceable to exact source. Run via
 # scripts/release.sh, which drives one build per platform with buildx.
+#
+# The base MUST NOT be newer than the oldest consuming image: mono's
+# duckdb-warehouse and unified images are both Debian bookworm (glibc 2.36), and
+# an extension built against a newer glibc fails to LOAD there (caught by the
+# image builds' --validate step).
 
-FROM ubuntu:24.04 AS build
+FROM debian:bookworm AS build
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates cmake g++ git libcurl4-openssl-dev libssl-dev make ninja-build python3 \
   && rm -rf /var/lib/apt/lists/*
