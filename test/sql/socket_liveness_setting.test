@@ -1,0 +1,39 @@
+# name: test/sql/socket_liveness_setting.test
+# description: quack_socket_liveness setting surface (behavior is validated by the subprocess probe suite)
+# group: [sql]
+
+require quack
+
+require httpfs
+
+# rollout default is observe: visible, never destructive
+query I
+select current_setting('quack_socket_liveness');
+----
+observe
+
+statement ok
+set global quack_socket_liveness = 'enforce';
+
+query I
+select current_setting('quack_socket_liveness');
+----
+enforce
+
+statement ok
+set global quack_socket_liveness = 'off';
+
+statement ok
+set global quack_socket_liveness = 'observe';
+
+# the liveness counters ride along on quack_server_list
+statement ok
+call quack_serve('quack:localhost', token='asdf');
+
+query II
+select info['socket_liveness_detected'], info['socket_liveness_cancelled'] from quack_server_list();
+----
+0	0
+
+statement ok
+call quack_stop('quack:localhost');

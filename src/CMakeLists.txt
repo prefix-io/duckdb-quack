@@ -11,6 +11,7 @@ add_library(
   quack_message.cpp
   quack_scan.cpp
   quack_server.cpp
+  quack_socket_watch.cpp
   quack_start_stop.cpp
   quack_storage.cpp
   quack_uri.cpp

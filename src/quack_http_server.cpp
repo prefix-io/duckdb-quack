@@ -6,7 +6,39 @@
 
 #include "httplib.hpp"
 
+#ifndef _WIN32
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <sys/socket.h>
+#endif
+
 namespace duckdb {
+
+//! Keepalive timers for accepted sockets (inherited from the listening socket on
+//! Linux): a silently partitioned peer — no FIN ever sent, e.g. node death —
+//! turns into a socket error after idle 30s + 3 probes x 10s ≈ 60s, which the
+//! socket-liveness watcher then observes. Without this, silent death is
+//! invisible until the response write, i.e. after the query already ran to
+//! completion.
+static void QuackServerSocketOptions(socket_t sock) {
+	duckdb_httplib::default_socket_options(sock);
+#ifndef _WIN32
+	int enable = 1;
+	setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &enable, sizeof(enable));
+#ifdef TCP_KEEPIDLE
+	int keep_idle = 30;
+	setsockopt(sock, IPPROTO_TCP, TCP_KEEPIDLE, &keep_idle, sizeof(keep_idle));
+#endif
+#ifdef TCP_KEEPINTVL
+	int keep_interval = 10;
+	setsockopt(sock, IPPROTO_TCP, TCP_KEEPINTVL, &keep_interval, sizeof(keep_interval));
+#endif
+#ifdef TCP_KEEPCNT
+	int keep_count = 3;
+	setsockopt(sock, IPPROTO_TCP, TCP_KEEPCNT, &keep_count, sizeof(keep_count));
+#endif
+#endif
+}
 
 void HttpQuackServer::StopAccepting() {
 	// Closes the listening socket only. Idempotent. Safe to call from a
@@ -67,6 +99,7 @@ HttpQuackServer::HttpQuackServer(ClientContext &context_p, const QuackUri &uri_p
 	server->set_keep_alive_max_count(128);
 	server->set_keep_alive_timeout(10);
 	server->set_tcp_nodelay(true);
+	server->set_socket_options(QuackServerSocketOptions);
 
 	server->Get("/", [=](const duckdb_httplib::Request &, duckdb_httplib::Response &res) {
 		res.set_content("This is a DuckDB Quack RPC endpoint. Use ATTACH 'quack:...' to connect here.\n", "text/plain");
@@ -81,7 +114,7 @@ HttpQuackServer::HttpQuackServer(ClientContext &context_p, const QuackUri &uri_p
 		res.status = 204;
 	});
 
-	server->Post("/quack", [&](const duckdb_httplib::Request &, duckdb_httplib::Response &res,
+	server->Post("/quack", [&](const duckdb_httplib::Request &req, duckdb_httplib::Response &res,
 	                           const duckdb_httplib::ContentReader &content_reader) {
 		res.set_header("Access-Control-Allow-Origin", "*");
 		MemoryStream stream;
@@ -89,7 +122,9 @@ HttpQuackServer::HttpQuackServer(ClientContext &context_p, const QuackUri &uri_p
 			stream.WriteData((data_ptr_t)data, data_length);
 			return true;
 		});
-		auto response = HandleMessage(stream);
+		// req.is_connection_closed is httplib's zero-timeout select + MSG_PEEK
+		// aliveness check on this request's socket — the socket-liveness probe.
+		auto response = HandleMessage(stream, req.is_connection_closed);
 		response->ToMemoryStream(stream);
 		res.set_content((const char *)stream.GetData(), stream.GetPosition(), "application/vnd.duckdb");
 	});

@@ -31,6 +31,8 @@ void QuackServer::ValidateToken(const string &token) {
 QuackServer::QuackServer(ClientContext &context_p, const QuackUri &uri_p, const string &token_p)
     : db_ptr(context_p.db), uri(uri_p), token(token_p) {
 	ValidateToken(token);
+	socket_watch = make_uniq<QuackSocketWatch>(db_ptr);
+	socket_watch->Start();
 }
 
 string QuackServer::TokenFromSecret(ClientContext &context, const QuackUri &uri) {
@@ -47,6 +49,9 @@ string QuackServer::TokenFromSecret(ClientContext &context, const QuackUri &uri)
 }
 
 QuackServer::~QuackServer() {
+	if (socket_watch) {
+		socket_watch->Stop();
+	}
 }
 
 vector<QuackConnectionSnapshot> QuackServer::GetActiveConnectionSnap() {
@@ -125,10 +130,15 @@ void QuackServer::ReapIfLatched(QuackConnection &connection) {
 }
 
 string QuackServer::CancelActiveQuery(QuackConnection &connection, optional_idx expected_query_id,
-                                      bool require_active) {
+                                      bool require_active, optional_idx expected_epoch) {
 	idx_t observed_epoch;
 	{
 		std::lock_guard<std::mutex> state_guard(connection.state_lock);
+		if (expected_epoch.IsValid() && connection.query_epoch != expected_epoch.GetIndex()) {
+			// The query this cancel was aimed at already ended; a newer query on the
+			// same connection must not be collateral damage.
+			return string();
+		}
 		if (expected_query_id.IsValid() && connection.active_client_query_id.IsValid() &&
 		    expected_query_id.GetIndex() != connection.active_client_query_id.GetIndex()) {
 			return "Cancellation rejected: stale query identity";
@@ -271,8 +281,33 @@ bool MessageRequiresConnection(MessageType type) {
 	}
 }
 
+namespace {
+//! Unregisters a socket watch on every exit path of HandleMessage.
+struct SocketWatchGuard {
+	SocketWatchGuard(QuackSocketWatch &watch_p, idx_t watch_id_p) : watch(watch_p), watch_id(watch_id_p) {
+	}
+	~SocketWatchGuard() {
+		watch.Unregister(watch_id);
+	}
+	QuackSocketWatch &watch;
+	idx_t watch_id;
+};
+} // namespace
+
+static bool MessageExecutesQuery(MessageType type) {
+	switch (type) {
+	case MessageType::PREPARE_REQUEST:
+	case MessageType::FETCH_REQUEST:
+	case MessageType::APPEND_REQUEST:
+		return true;
+	default:
+		return false;
+	}
+}
+
 // main switcheroo happens here
-unique_ptr<QuackMessage> QuackServer::HandleMessage(MemoryStream &read_stream) {
+unique_ptr<QuackMessage> QuackServer::HandleMessage(MemoryStream &read_stream,
+                                                    const std::function<bool()> &connection_closed_probe) {
 	auto db = db_ptr.lock();
 	if (!db) {
 		return make_uniq<ErrorResponse>("Database was closed");
@@ -321,8 +356,18 @@ unique_ptr<QuackMessage> QuackServer::HandleMessage(MemoryStream &read_stream) {
 	// now deserialize the actual message
 	auto received_message = QuackMessage::DeserializeMessage(deserializer, header);
 
+	// While an executing message is parked here, its client socket is watched:
+	// the client can never receive this response if that socket dies, so a dead
+	// socket means the query is pure waste (Layer 2 socket liveness).
+	unique_ptr<SocketWatchGuard> watch_guard;
+	if (connection && connection_closed_probe && socket_watch && MessageExecutesQuery(header.type)) {
+		auto watch_id = socket_watch->Register(connection, connection_closed_probe);
+		watch_guard = make_uniq<SocketWatchGuard>(*socket_watch, watch_id);
+	}
+
 	// process the message
 	auto response = HandleMessageInternal(*db, *received_message, connection);
+	watch_guard.reset();
 
 	// reap a latched connection once its query is no longer executing; while a
 	// query is active or unwinding the entry must stay visible to

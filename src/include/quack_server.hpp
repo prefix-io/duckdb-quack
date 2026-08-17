@@ -5,6 +5,7 @@
 #include "duckdb/common/optional_ptr.hpp"
 #include "duckdb/common/shared_ptr.hpp"
 
+#include "quack_socket_watch.hpp"
 #include "quack_uri.hpp"
 
 #include "httplib.hpp" // TODO forward declare
@@ -109,8 +110,17 @@ public:
 	//! string, or empty on success. `expected_query_id`, when valid, must match the
 	//! active query's client_query_id or the cancel is rejected as stale.
 	//! `require_active` distinguishes CANCEL (error when idle) from DISCONNECT
-	//! (idle is fine).
-	string CancelActiveQuery(QuackConnection &connection, optional_idx expected_query_id, bool require_active);
+	//! (idle is fine). `expected_epoch`, when valid, silently skips the cancel if
+	//! the query it targets already ended (socket-liveness completion races).
+	static string CancelActiveQuery(QuackConnection &connection, optional_idx expected_query_id, bool require_active,
+	                                optional_idx expected_epoch = optional_idx());
+
+	idx_t SocketLivenessDetected() {
+		return socket_watch ? socket_watch->DetectedCount() : 0;
+	}
+	idx_t SocketLivenessCancelled() {
+		return socket_watch ? socket_watch->CancelledCount() : 0;
+	}
 
 	string GenerateSessionId();
 
@@ -141,12 +151,17 @@ public:
 	}
 
 protected:
-	unique_ptr<QuackMessage> HandleMessage(MemoryStream &read_stream);
+	//! `connection_closed_probe`, when set, is the transport's cheap "has the
+	//! client's socket died" check for THIS request; executing messages register
+	//! it with the socket watch for the time they are parked.
+	unique_ptr<QuackMessage> HandleMessage(MemoryStream &read_stream,
+	                                       const std::function<bool()> &connection_closed_probe = nullptr);
 	unique_ptr<QuackMessage> HandleMessageInternal(DatabaseInstance &db, QuackMessage &received_message,
 	                                               optional_ptr<QuackConnection> connection);
 
 protected:
 	std::vector<std::thread> listen_threads;
+	unique_ptr<QuackSocketWatch> socket_watch;
 
 	weak_ptr<DatabaseInstance> db_ptr;
 	mutex active_connections_mutex;

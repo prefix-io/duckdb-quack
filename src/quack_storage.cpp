@@ -45,6 +45,8 @@ vector<QuackStorageExtensionInfo::ServerSnapshot> QuackStorageExtensionInfo::Lis
 		snap.port = uri.Port();
 		snap.active_connections = kv.second->ActiveConnectionCount();
 		snap.info.emplace_back("ipv6", uri.IPv6() ? "true" : "false");
+		snap.info.emplace_back("socket_liveness_detected", std::to_string(kv.second->SocketLivenessDetected()));
+		snap.info.emplace_back("socket_liveness_cancelled", std::to_string(kv.second->SocketLivenessCancelled()));
 		result.push_back(std::move(snap));
 	}
 	return result;
