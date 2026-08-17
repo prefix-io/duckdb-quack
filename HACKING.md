@@ -66,7 +66,7 @@ GitHub release. amd64 builds run emulated on arm64 dev machines — slow (an hou
 or more) but correct.
 
 Then update `prefix/common/data_warehouse/duckdb/quack_pin.json` in mono with
-the new tag and per-platform SHA-256 values; the image builds, test helpers, and
+the new tag, per-platform SHA-256 values, and `extension_version` (the fork commit short sha, stamped into the build and enforced everywhere); the image builds, test helpers, and
 benchmark tooling all read that one file.
 
 ## Layout notes
