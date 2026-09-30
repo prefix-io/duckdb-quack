@@ -1,7 +1,7 @@
 # Hacking on the Prefix quack fork
 
 This fork (`prefix-io/duckdb-quack`) hardens query abandonment/cancellation on
-branch `prefix/v1.5-abandonment` (production, builds against DuckDB v1.5.5) with
+branch `prefix/v1.5-abandonment` (production, builds against DuckDB v1.5.6) with
 `prefix/main-abandonment` as the experimental mainline reference. Design and
 validation history: `docs/plans/duckdb-quack-cancellation-hardening.md` and
 `docs/plans/duckdb-quack-phase0-findings.md` in the mono repo.
@@ -14,7 +14,7 @@ machine.
 
 ```sh
 sudo apt-get install -y cmake ninja-build g++ libssl-dev libcurl4-openssl-dev
-git submodule update --init          # duckdb pinned at v1.5.5 (d8cdaa33fd)
+git submodule update --init          # duckdb pinned at v1.5.6 (069cc9f9b5)
 GEN=ninja make release               # ~15 min cold, seconds warm
 ```
 
@@ -77,7 +77,7 @@ commit (`scripts/artifact.Dockerfile`), writes `out/SHA256SUMS`, and creates the
 GitHub release. amd64 builds run emulated on arm64 dev machines — slow (an hour
 or more) but correct.
 
-Then update `prefix/common/data_warehouse/duckdb/quack_pin.json` in mono with
+Then update `prefix/common/quack_artifact/quack_pin.json` in mono with
 the new tag, per-platform SHA-256 values, and `extension_version` (the fork commit short sha, stamped into the build and enforced everywhere); the image builds, test helpers, and
 benchmark tooling all read that one file.
 
