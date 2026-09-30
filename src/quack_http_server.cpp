@@ -161,6 +161,10 @@ HttpQuackServer::HttpQuackServer(ClientContext &context_p, const QuackUri &uri_p
 	}
 
 	listen_threads.push_back(std::thread(ListenThread, this, uri_p.Host(), uri_p.Port()));
+	// httplib::stop() only closes the bound socket once listen_internal() has
+	// set is_running_. Returning earlier lets an immediate quack_stop() leave
+	// a listener behind, serving requests after its database has been closed.
+	server->wait_until_ready();
 }
 
 } // namespace duckdb

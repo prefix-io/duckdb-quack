@@ -25,7 +25,8 @@ RUN git clone ${QUACK_REPO} /src \
   && git submodule update --init
 
 WORKDIR /src
-RUN GEN=ninja make release
+ARG BUILD_JOBS=6
+RUN CMAKE_BUILD_PARALLEL_LEVEL=${BUILD_JOBS} GEN=ninja make release
 
 # Provenance: record exactly what was built.
 RUN cd /src \
