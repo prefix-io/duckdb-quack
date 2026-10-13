@@ -1,0 +1,36 @@
+# name: test/sql/serve_stop_before_accept.test
+# description: an immediate stop must close the socket before the listener accepts any requests
+# group: [sql]
+
+require quack
+
+require httpfs
+
+set ignore_error_messages __none__
+
+statement ok
+create table t as select 42 as v;
+
+# With no requests between serve and stop, the listener thread may not have
+# started yet. A stopped server must not retain its SO_REUSEPORT socket.
+loop i 0 16
+
+statement ok
+call quack_serve('quack:127.0.0.1:19449', token='stopped');
+
+statement ok
+call quack_stop('quack:127.0.0.1:19449');
+
+endloop
+
+statement ok
+call quack_serve('quack:127.0.0.1:19449', token='current');
+
+# Any leaked listener would reject this token, or report a closed database.
+query I
+select * from quack_query('quack:127.0.0.1:19449', 'select v from t', token='current', disable_ssl=true);
+----
+42
+
+statement ok
+call quack_stop('quack:127.0.0.1:19449');

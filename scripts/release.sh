@@ -33,7 +33,7 @@ fi
 
 mkdir -p out
 for arch in "${ARCHES[@]}"; do
-  rm -rf "out/linux_${arch}" "out/quack-duckdb_v1.5.5-linux_${arch}.duckdb_extension"
+  rm -rf "out/linux_${arch}" "out/quack-duckdb_v1.5.6-linux_${arch}.duckdb_extension"
   echo "=== building linux/${arch} from ${COMMIT} ==="
   docker buildx build \
     --platform "linux/${arch}" \
@@ -42,7 +42,7 @@ for arch in "${ARCHES[@]}"; do
     --output "type=local,dest=out/linux_${arch}" \
     -f scripts/artifact.Dockerfile \
     scripts
-  mv "out/linux_${arch}/quack.duckdb_extension" "out/quack-duckdb_v1.5.5-linux_${arch}.duckdb_extension"
+  mv "out/linux_${arch}/quack.duckdb_extension" "out/quack-duckdb_v1.5.6-linux_${arch}.duckdb_extension"
   cat "out/linux_${arch}/PROVENANCE"
 done
 
@@ -54,5 +54,5 @@ if [[ -n "$PUBLISH_TAG" ]]; then
     --title "$PUBLISH_TAG" \
     --notes "Prefix quack fork artifacts built from ${COMMIT}. See HACKING.md for validation steps run before release." \
     out/*.duckdb_extension out/SHA256SUMS
-  echo "Published release $PUBLISH_TAG. Update prefix/common/data_warehouse/duckdb/quack_pin.json in mono."
+  echo "Published release $PUBLISH_TAG. Update prefix/common/quack_artifact/quack_pin.json in mono."
 fi
