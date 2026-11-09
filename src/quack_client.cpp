@@ -132,9 +132,8 @@ unique_ptr<QuackMessage> HttpsQuackClient::RequestInternal(optional_ptr<ClientCo
 	} else {
 		job->params = http_util.InitializeParameters(db, request_url);
 	}
-	job->params->timeout = request_timeout_override_seconds.IsValid()
-	                           ? request_timeout_override_seconds.GetIndex()
-	                           : HTTP_TIMEOUT_SECONDS;
+	job->params->timeout =
+	    request_timeout_override_seconds.IsValid() ? request_timeout_override_seconds.GetIndex() : HTTP_TIMEOUT_SECONDS;
 	job->params->retries = 0;
 	request_message->ToMemoryStream(job->request_stream);
 	job->post = make_uniq<PostRequestInfo>(job->url, job->headers, *job->params, job->request_stream.GetData(),
@@ -363,8 +362,8 @@ shared_ptr<QuackClientConnection> QuackClient::ConnectToServer(ClientContext &co
 	// construct the client connection and return it
 	auto connection_id = connection_request_response->ConnectionId();
 	auto negotiated_version = connection_request_response->QuackVersion();
-	auto connection = make_shared_ptr<QuackClientConnection>(std::move(client), uri, std::move(connection_id),
-	                                                         negotiated_version);
+	auto connection =
+	    make_shared_ptr<QuackClientConnection>(std::move(client), uri, std::move(connection_id), negotiated_version);
 	// v3+ servers lease-reap silent connections; keep ours alive for as long as
 	// this connection object exists.
 	connection->StartHeartbeat(*context.db);

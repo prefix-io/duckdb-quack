@@ -87,8 +87,8 @@ void QuackSocketWatch::LogDetection(const string &connection_id, QuackSocketLive
 	if (!logger.ShouldLog(QuackLogType::NAME, QuackLogType::LEVEL)) {
 		return;
 	}
-	auto detail = StringUtil::Format("socket liveness: client socket dead for connection %s (mode=%s%s)",
-	                                 connection_id, mode == QuackSocketLivenessMode::ENFORCE ? "enforce" : "observe",
+	auto detail = StringUtil::Format("socket liveness: client socket dead for connection %s (mode=%s%s)", connection_id,
+	                                 mode == QuackSocketLivenessMode::ENFORCE ? "enforce" : "observe",
 	                                 cancelled ? ", query cancelled" : "");
 	auto msg = QuackLogType::ConstructLogMessage(MessageType::INVALID, connection_id, optional_idx(), "", "", 0,
 	                                             MessageType::INVALID, detail);

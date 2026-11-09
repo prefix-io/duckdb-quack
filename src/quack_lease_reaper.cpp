@@ -74,9 +74,9 @@ void QuackLeaseReaper::LogExpiry(const string &connection_id, int64_t lease_age_
 	if (!logger.ShouldLog(QuackLogType::NAME, QuackLogType::LEVEL)) {
 		return;
 	}
-	auto detail = StringUtil::Format("lease expired for connection %s: no traffic for %lldms (mode=%s%s)",
-	                                 connection_id, lease_age_ms, mode == QuackLeaseMode::ENFORCE ? "enforce" : "observe",
-	                                 reaped ? ", connection reaped" : "");
+	auto detail = StringUtil::Format(
+	    "lease expired for connection %s: no traffic for %lldms (mode=%s%s)", connection_id, lease_age_ms,
+	    mode == QuackLeaseMode::ENFORCE ? "enforce" : "observe", reaped ? ", connection reaped" : "");
 	auto msg = QuackLogType::ConstructLogMessage(MessageType::INVALID, connection_id, optional_idx(), "", "", 0,
 	                                             MessageType::INVALID, detail);
 	logger.WriteLog(QuackLogType::NAME, QuackLogType::LEVEL, msg);
