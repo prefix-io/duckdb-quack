@@ -38,7 +38,18 @@ DuckDB-style extension repository under `build/release/repository/`.
    python3 scripts/stress_cancel.py 1000
    ```
 
-3. **Lease probes** — real server + real client subprocesses covering
+3. **Stop probe** (Linux; it counts `/proc/self/task`). A statement that never
+   ends on its own runs over the server when it is stopped, with and without
+   `wait := true`. The probe fails unless the stop returns within 5 s, the
+   statement ends in an error, and the process's threads are back at the
+   pre-serve count: with `wait`, at most 4 over when the stop returns and none
+   over 200 ms later; without it, within 10 s.
+
+   ```sh
+   python3 scripts/probe_stop.py
+   ```
+
+4. **Lease probes** — real server + real client subprocesses covering
    kill-between-fetches (enforce reaps ≤75s / observe counts only — the Canyon
    leak), a slow consumer pausing 3× the lease (heartbeats keep it alive),
    SIGSTOP false-positive guard, and an old v2 client that must never be
@@ -49,14 +60,14 @@ DuckDB-style extension repository under `build/release/repository/`.
    python3 scripts/probe_lease.py sigstop    # one scenario
    ```
 
-4. **Layer 1/2 behavior probes** — real server + client subprocesses covering
+5. **Layer 1/2 behavior probes** — real server + client subprocesses covering
    SIGKILL mid-query, local interrupt, operator cancel, and iptables-silenced
    partition (keepalive). The ad-hoc harness and results to date are recorded
    in `docs/plans/duckdb-quack-phase0-findings.md` (mono). Re-run at minimum the
    SIGKILL-mid-CTAS enforce probe when touching the socket-liveness or
    cancellation paths.
 
-5. **Caveat when testing by hand:** `INSTALL quack FROM <repo>` silently keeps a
+6. **Caveat when testing by hand:** `INSTALL quack FROM <repo>` silently keeps a
    previously cached extension — always `FORCE INSTALL quack FROM
    '<...>/build/release/repository'` or you are validating a stale binary. Also
    `LOAD httpfs` on the *server* connection: session-id generation needs its

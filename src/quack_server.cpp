@@ -96,6 +96,27 @@ vector<shared_ptr<QuackConnection>> QuackServer::SnapshotConnections() {
 	return result;
 }
 
+void QuackServer::CancelActiveQueries(optional_ptr<ClientContext> caller) {
+	// Snapshot first: tearing down a suspended result can reap, which takes the
+	// registry mutex.
+	for (auto &connection : SnapshotConnections()) {
+		if (caller && connection->duckdb_connection->context.get() == caller.get()) {
+			continue;
+		}
+		CancelActiveQuery(*connection, optional_idx(), false);
+	}
+}
+
+bool QuackServer::ServesContext(ClientContext &context) {
+	std::lock_guard<std::mutex> lock(active_connections_mutex);
+	for (auto &conn_kv : active_connections) {
+		if (conn_kv.second->duckdb_connection->context.get() == &context) {
+			return true;
+		}
+	}
+	return false;
+}
+
 shared_ptr<QuackConnection> QuackServer::GetConnection(const string &connection_id) {
 	std::lock_guard<std::mutex> lock(active_connections_mutex);
 	auto it = active_connections.find(connection_id);

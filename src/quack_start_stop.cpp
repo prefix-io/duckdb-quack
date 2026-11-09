@@ -12,6 +12,8 @@ struct QuackStartStopFunctionData : public TableFunctionData {
 	bool finished = false;
 	QuackUri listen_uri;
 	string token;
+	//! quack_stop: destroy the server before returning (see StopServer).
+	bool wait = false;
 };
 
 static unique_ptr<FunctionData> QuackServeBind(ClientContext &context, TableFunctionBindInput &input,
@@ -108,6 +110,10 @@ static unique_ptr<FunctionData> QuackStopBind(ClientContext &context, TableFunct
 	}
 	bind_data->listen_uri =
 	    QuackUri(uri_value.GetValue<string>(), /* not really, but we don't want to ask the user again */ true);
+	auto wait_entry = input.named_parameters.find("wait");
+	if (wait_entry != input.named_parameters.end()) {
+		bind_data->wait = wait_entry->second.GetValue<bool>();
+	}
 	return_types.emplace_back(LogicalType::VARCHAR);
 	names.emplace_back("status");
 
@@ -120,7 +126,7 @@ static void QuackStop(ClientContext &context, TableFunctionInput &data_p, DataCh
 		return;
 	}
 	auto &state = QuackStorageExtensionInfo::GetState(*context.db);
-	if (state.StopServer(context, bind_data.listen_uri)) {
+	if (state.StopServer(context, bind_data.listen_uri, bind_data.wait)) {
 		output.data[0].SetValue(0, StringUtil::Format("Stopped listening on %s", bind_data.listen_uri.Uri()));
 	} else {
 		output.data[0].SetValue(0, StringUtil::Format("No server found listening on %s", bind_data.listen_uri.Uri()));
@@ -130,7 +136,9 @@ static void QuackStop(ClientContext &context, TableFunctionInput &data_p, DataCh
 }
 
 TableFunction QuackStopFunction::GetFunction() {
-	return TableFunction("quack_stop", {LogicalType::VARCHAR}, QuackStop, QuackStopBind);
+	auto fun = TableFunction("quack_stop", {LogicalType::VARCHAR}, QuackStop, QuackStopBind);
+	fun.named_parameters["wait"] = LogicalType::BOOLEAN;
+	return fun;
 }
 
 struct QuackServerListFunctionData : public TableFunctionData {
