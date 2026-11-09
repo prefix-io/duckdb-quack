@@ -28,15 +28,3 @@ jobs:
       ci_tools_version: v1.5.6
       extension_name: quack
       format_checks: 'format'
-
-  duckdb-stable-deploy:
-    name: Deploy extension binaries
-    needs: duckdb-stable-build
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_deploy.yml@v1.5.6
-    secrets: inherit
-    with:
-      extension_name: quack
-      duckdb_version: v1.5.6
-      ci_tools_version: v1.5.6
-      deploy_latest: ${{ startsWith(github.ref, 'refs/heads/v') }}
-      deploy_versioned: ${{ startsWith(github.ref, 'refs/heads/v') || github.ref == 'refs/heads/main' }}
