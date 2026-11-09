@@ -76,7 +76,28 @@ DuckDB-style extension repository under `build/release/repository/`.
 ## Releasing artifacts for mono
 
 Mono consumes pinned, checksum-verified release assets (never `FROM core`, never
-"latest"). To publish:
+"latest"). To publish, run the checklist above, then push an annotated tag on a
+commit of `prefix/v1.5-abandonment`, its message the validation list:
+
+```sh
+git tag -a v1.5-abandonment.N <commit> -m "- SQL logic tests: ...
+- stress_cancel.py 1000: ...
+- probe_lease.py: ...
+- probe_stop.py: ..."
+git push origin v1.5-abandonment.N
+```
+
+The Release workflow (`.github/workflows/release.yml`) builds each arch on a
+native runner with `scripts/release.sh --arch` (the same clean-container build,
+`scripts/artifact.Dockerfile`, from the tagged commit), checks both built the
+same source, and creates the GitHub release with both extensions, `SHA256SUMS`
+and notes naming the commit, the DuckDB submodule and the validation list. It
+refuses a commit not on `prefix/v1.5-abandonment`, a tag naming another commit,
+an existing release, and an empty validation list. It can also be dispatched
+with `tag`, `commit` and `validation`, once the workflow is on the repository's
+default branch (GitHub dispatches only from there).
+
+By hand, as the fallback when runners are out:
 
 ```sh
 git push                                        # artifacts build from the pushed commit
