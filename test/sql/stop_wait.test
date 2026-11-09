@@ -1,0 +1,67 @@
+# name: test/sql/stop_wait.test
+# description: quack_stop(wait := true) destroys the server before returning, and is refused over the server it stops
+# group: [sql]
+
+require quack
+
+require httpfs
+
+set ignore_error_messages __none__
+
+statement ok
+create table fuu as values(42, 43);
+
+statement ok con1
+call quack_serve('quack:localhost', token='asdf');
+
+statement ok con2
+attach 'quack:localhost' as rpc2 (token 'asdf');
+
+query II con2
+from rpc2.fuu;
+----
+42	43
+
+# sent over the server it stops, a waiting stop would join its own request thread
+statement error con2
+from quack_query('quack:localhost', 'from quack_stop(''quack:localhost'', wait := true)', token='asdf');
+----
+cannot be sent over the server it stops
+
+# the refused stop left the server serving
+query I con2
+from quack_query('quack:localhost', 'select 42', token='asdf');
+----
+42
+
+statement ok con2
+detach rpc2;
+
+query I con1
+from quack_stop('quack:localhost', wait := true);
+----
+Stopped listening on quack:localhost
+
+query I con1
+select count(*) from quack_server_list();
+----
+0
+
+# the port and the uri are free as soon as the waiting stop returns
+statement ok con1
+call quack_serve('quack:localhost', token='asdf');
+
+query I con2
+from quack_query('quack:localhost', 'select 43', token='asdf');
+----
+43
+
+query I con1
+from quack_stop('quack:localhost', wait := true);
+----
+Stopped listening on quack:localhost
+
+query I con1
+from quack_stop('quack:localhost', wait := true);
+----
+No server found listening on quack:localhost
