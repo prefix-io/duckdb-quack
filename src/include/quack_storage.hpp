@@ -18,7 +18,13 @@ public:
 	static QuackStorageExtensionInfo &GetState(const DatabaseInstance &instance);
 
 	QuackServer &CreateServer(ClientContext &context, const QuackUri &listen_uri, const string &token);
-	bool StopServer(ClientContext &context, const QuackUri &listen_uri);
+	//! Stop the server: close the listener, cancel its connections' active queries,
+	//! then destroy it. With `wait`, the destruction runs on the calling thread, so
+	//! the listener, the httplib worker pool, the lease reaper and the socket watch
+	//! have all been joined when this returns. Without it, it runs on a detached
+	//! thread. `wait` is refused for a statement sent over the server being stopped:
+	//! the pool join would wait on the very request that is running it.
+	bool StopServer(ClientContext &context, const QuackUri &listen_uri, bool wait = false);
 
 	struct ServerSnapshot {
 		string listen_uri;

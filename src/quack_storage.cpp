@@ -86,7 +86,7 @@ void QuackStorageExtensionInfo::CancelConnection(const string &connection_id, op
 	throw InvalidInputException("Unknown connection id: %s", connection_id);
 }
 
-bool QuackStorageExtensionInfo::StopServer(ClientContext &context, const QuackUri &listen_uri) {
+bool QuackStorageExtensionInfo::StopServer(ClientContext &context, const QuackUri &listen_uri, bool wait) {
 	unique_ptr<QuackServer> to_destroy;
 	{
 		std::lock_guard<std::mutex> lock(servers_mutex);
@@ -94,11 +94,23 @@ bool QuackStorageExtensionInfo::StopServer(ClientContext &context, const QuackUr
 		if (it == servers.end()) {
 			return false;
 		}
+		if (wait && it->second->ServesContext(context)) {
+			throw InvalidInputException("quack_stop(wait := true) cannot be sent over the server it stops: stopping "
+			                            "joins that server's request threads, including the one running this "
+			                            "statement");
+		}
 		to_destroy = std::move(it->second);
 		servers.erase(it);
 	}
 	// Synchronously free the listening port
 	to_destroy->StopAccepting();
+	// A worker still executing a statement holds the pool join until the statement
+	// ends on its own; for one whose client gave up, that can be never.
+	to_destroy->CancelActiveQueries(&context);
+	if (wait) {
+		to_destroy.reset();
+		return true;
+	}
 	// Full destruction (httplib worker-pool join) runs off-thread
 	std::thread([srv = std::move(to_destroy)]() mutable { srv.reset(); }).detach();
 	return true;

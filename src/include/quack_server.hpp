@@ -131,6 +131,17 @@ public:
 	static string CancelActiveQuery(QuackConnection &connection, optional_idx expected_query_id, bool require_active,
 	                                optional_idx expected_epoch = optional_idx());
 
+	//! Cancel the active query of every connection (DISCONNECT semantics: idle is
+	//! fine) except the one whose context is `caller`, when given: a quack_stop
+	//! issued over one of this server's own connections must not interrupt itself.
+	//! StopServer calls this before the worker-pool join, so a statement whose
+	//! client gave up cannot hold a worker, and the threads it runs on, past the stop.
+	void CancelActiveQueries(optional_ptr<ClientContext> caller);
+
+	//! True when `context` is the DuckDB context of one of this server's
+	//! connections, i.e. the caller is a statement sent over this server.
+	bool ServesContext(ClientContext &context);
+
 	idx_t SocketLivenessDetected() {
 		return socket_watch ? socket_watch->DetectedCount() : 0;
 	}
