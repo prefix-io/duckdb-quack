@@ -1,0 +1,163 @@
+#
+# Builds and publishes the Prefix quack fork's release artifacts for mono: the
+# same clean-container build `scripts/release.sh` drives (scripts/artifact.Dockerfile,
+# from the pushed commit, never a working tree), one native runner per arch, then
+# one GitHub release with both extensions and SHA256SUMS. `scripts/release.sh`
+# stays the by-hand fallback.
+#
+# Dispatch with a tag (and optionally the commit, by default the tip of
+# prefix/v1.5-abandonment), or push an annotated v1.5-abandonment.* tag. The
+# release notes' validation list is the dispatch's `validation` input, or the
+# annotated tag's message.
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag: v1.5-abandonment.N"
+        required: true
+      commit:
+        description: "Commit to build (default: the tip of prefix/v1.5-abandonment)"
+        required: false
+        default: ""
+      validation:
+        description: "Validation completed before publication (the HACKING.md checklist results), one item per line"
+        required: true
+  push:
+    tags:
+      - "v1.5-abandonment.*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    name: Resolve tag and commit
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      commit: ${{ steps.resolve.outputs.commit }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_COMMIT: ${{ inputs.commit }}
+          INPUT_VALIDATION: ${{ inputs.validation }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
+            TAG="$GITHUB_REF_NAME"
+            COMMIT=$(git rev-parse "${TAG}^{commit}")
+            VALIDATION=$(git tag -l --format='%(contents)' "$TAG")
+          else
+            TAG="$INPUT_TAG"
+            COMMIT=$(git rev-parse "${INPUT_COMMIT:-origin/prefix/v1.5-abandonment}^{commit}")
+            VALIDATION="$INPUT_VALIDATION"
+          fi
+          if [[ ! "$TAG" =~ ^v1\.5-abandonment\.[0-9]+$ ]]; then
+            echo "::error::$TAG is not a v1.5-abandonment.N tag"; exit 1
+          fi
+          if ! git merge-base --is-ancestor "$COMMIT" origin/prefix/v1.5-abandonment; then
+            echo "::error::$COMMIT is not on prefix/v1.5-abandonment; refusing to publish"; exit 1
+          fi
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null \
+            && [[ "$(git rev-parse "${TAG}^{commit}")" != "$COMMIT" ]]; then
+            echo "::error::tag $TAG already names $(git rev-parse "${TAG}^{commit}"), not $COMMIT"; exit 1
+          fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::error::release $TAG already exists"; exit 1
+          fi
+          if [[ -z "${VALIDATION//[[:space:]]/}" ]]; then
+            echo "::error::no validation list: dispatch with 'validation', or push an annotated tag whose message is the list"; exit 1
+          fi
+          printf '%s\n' "$VALIDATION" > validation.txt
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: validation
+          path: validation.txt
+
+  build:
+    name: Build linux_${{ matrix.arch }}
+    needs: resolve
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.commit }}
+          fetch-depth: 0
+      - uses: docker/setup-buildx-action@v3
+      - name: Build (scripts/release.sh, native)
+        run: scripts/release.sh --arch ${{ matrix.arch }}
+      - name: Check provenance
+        env:
+          COMMIT: ${{ needs.resolve.outputs.commit }}
+        run: |
+          set -euo pipefail
+          grep -qx "quack_commit=$COMMIT" out/linux_${{ matrix.arch }}/PROVENANCE \
+            || { echo "::error::built $(cat out/linux_${{ matrix.arch }}/PROVENANCE), not $COMMIT"; exit 1; }
+          cp out/linux_${{ matrix.arch }}/PROVENANCE out/PROVENANCE-linux_${{ matrix.arch }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux_${{ matrix.arch }}
+          path: |
+            out/quack-duckdb_v1.5.6-linux_${{ matrix.arch }}.duckdb_extension
+            out/PROVENANCE-linux_${{ matrix.arch }}
+          if-no-files-found: error
+
+  publish:
+    name: Publish ${{ needs.resolve.outputs.tag }}
+    needs: [resolve, build]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+          COMMIT: ${{ needs.resolve.outputs.commit }}
+        run: |
+          set -euo pipefail
+          cd out
+          # Both arches built the same source.
+          diff PROVENANCE-linux_amd64 PROVENANCE-linux_arm64
+          duckdb_commit=$(sed -n 's/^duckdb_commit=//p' PROVENANCE-linux_amd64)
+          duckdb_version=$(sed -n 's/^duckdb_version=//p' PROVENANCE-linux_amd64)
+          sha256sum ./*.duckdb_extension > SHA256SUMS
+          cat SHA256SUMS
+          {
+            echo "Prefix Quack for DuckDB ${duckdb_version#v}, built from \`${COMMIT}\`; DuckDB submodule \`${duckdb_commit}\`."
+            echo
+            echo "Built by the Release workflow (run ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}): one clean-container build per arch on native runners (\`scripts/artifact.Dockerfile\`)."
+            echo
+            echo "Validation completed before publication:"
+            sed 's/^\([^-]\)/- \1/' validation.txt
+            echo
+            echo "Mono: update \`prefix/common/quack_artifact/quack_pin.json\` with this tag, \`extension_version\` and both SHA-256 values (SHA256SUMS)."
+          } > notes.md
+          gh release create "$TAG" \
+            --target "$COMMIT" \
+            --title "$TAG — DuckDB ${duckdb_version#v}" \
+            --notes-file notes.md \
+            ./*.duckdb_extension SHA256SUMS
