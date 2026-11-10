@@ -56,8 +56,18 @@ jobs:
           set -euo pipefail
           if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
             TAG="$GITHUB_REF_NAME"
+            # actions/checkout re-fetches the pushed tag as +<sha>:refs/tags/<tag>, which
+            # replaces the annotated tag with a lightweight one naming the commit; reading
+            # it then yields the commit message. Fetch the tag object itself back.
+            git fetch --force --no-tags origin "+refs/tags/${TAG}:refs/tags/${TAG}"
+            if [[ "$(git cat-file -t "refs/tags/$TAG")" != "tag" ]]; then
+              echo "::error::$TAG is not an annotated tag; its message must be the validation list"; exit 1
+            fi
             COMMIT=$(git rev-parse "${TAG}^{commit}")
-            VALIDATION=$(git tag -l --format='%(contents)' "$TAG")
+            if [[ "$COMMIT" != "$GITHUB_SHA" ]]; then
+              echo "::error::tag $TAG names $COMMIT, but this run was triggered for $GITHUB_SHA"; exit 1
+            fi
+            VALIDATION=$(git for-each-ref --format='%(contents)' "refs/tags/$TAG")
           else
             TAG="$INPUT_TAG"
             COMMIT=$(git rev-parse "${INPUT_COMMIT:-origin/prefix/v1.5-abandonment}^{commit}")
