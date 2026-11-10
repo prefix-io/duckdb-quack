@@ -39,11 +39,12 @@ struct QuackActiveConnectionsData : FunctionData {
 
 static unique_ptr<FunctionData> QuackActiveConnectionsBind(ClientContext &, TableFunctionBindInput &,
                                                            vector<LogicalType> &return_types, vector<string> &names) {
-	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
+	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR,   LogicalType::VARCHAR,
 	                LogicalType::VARCHAR, LogicalType::TIMESTAMP, LogicalType::BIGINT,
 	                LogicalType::BIGINT,  LogicalType::VARCHAR,   LogicalType::BIGINT};
-	names = {"server_id",        "connection_id",   "query",       "state",       "query_started_at",
-	         "protocol_version", "client_query_id", "lease_state", "lease_age_seconds"};
+	names = {"server_id",       "connection_id",    "query",
+	         "state",           "query_started_at", "protocol_version",
+	         "client_query_id", "lease_state",      "lease_age_seconds"};
 	return make_uniq<QuackActiveConnectionsData>();
 }
 

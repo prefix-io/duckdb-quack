@@ -173,8 +173,8 @@ void QuackServer::ReapIfLatched(QuackConnection &connection) {
 	RemoveConnection(connection.session_id);
 }
 
-string QuackServer::CancelActiveQuery(QuackConnection &connection, optional_idx expected_query_id,
-                                      bool require_active, optional_idx expected_epoch) {
+string QuackServer::CancelActiveQuery(QuackConnection &connection, optional_idx expected_query_id, bool require_active,
+                                      optional_idx expected_epoch) {
 	idx_t observed_epoch;
 	{
 		std::lock_guard<std::mutex> state_guard(connection.state_lock);
